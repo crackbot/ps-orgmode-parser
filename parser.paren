@@ -1,0 +1,176 @@
+
+;; * Top level headline
+;;   Hello world
+;; * Another top level headline
+
+(defvar *buffers (array :headline
+                        :headline-text))
+
+(defvar *events (array 'open-headline
+                       'close-headline
+                       'text
+                       'title
+                       'new-line))
+
+(defvar *states (array :begin
+                       :begin-whitespace
+                       :newline
+                       :text
+                       :headline-l1
+                       :headline-title))
+
+;; init state map
+(defvar *state (create))
+
+(defvar _s 0)
+
+(dolist (s *states)
+  (setf (getprop *state s) _s
+        _s (1+ _s)))
+
+(defun is-newline (c)
+  (eq (-> c (char-code-at 0)) 10))
+
+  ;;     (eq c "\t")
+  ;; )
+
+(defun is-whitespace (c)
+  (eq c " "))
+
+(defun is-char (c)
+  (let ((number "0124356789")
+        (letter "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    (or (> (-> number (index-of c)) -1)
+        (> (-> letter (index-of c)) -1))))
+
+(defun is-control-char (c)
+  (eq c "*"))
+
+(defun emit (parser event value)
+  (let ((cb (getprop (@ parser options) event)))
+    (when cb
+      (cb value))))
+
+(defjsclass *org-parser ()
+  
+  (defun initialize (options)
+    (setf% options options
+           state (@ *state :begin)
+           text-node ""))
+  
+  (defun write (data)
+    (let ((i 0)
+          (p this)
+          (s *state))
+      (while t
+        (let ((c (-> data (char-at i))))
+
+          (when (not c)
+            (break))
+
+          ; (-> console (log (+ "switch: " (@ p state))))
+          
+          (switch (@ p state)
+
+            ;; BEGIN
+            ((@ s :begin)
+             (cond ((eq c "*")
+                    (progn
+                      (setf (@ p state) (@ s :headline-l1))))
+                   ((is-char c)
+                    (setf (@ p text-node) c)
+                    (setf (@ p state) (@ s :text)))
+                   ((is-whitespace c)
+                    (setf (@ p state) (@ s :begin-whitespace)))
+                   ((is-newline c)
+                    (setf (@ p state) (@ s :newline)))
+                   (t
+                    (progn
+                      (-> console (log c))
+                      (throw (new (*error (+ "Not correct char: " (-> c (char-code-at 0)))))))))
+             (break))
+
+            ;; HEADLINE START
+            ((@ s :headline-l1)
+             ;; text, or newline comes next
+             (let ((level 0))
+               (when (eq c "*") ; means it's headline l2-l6
+                 (while (and c (eq c "*"))
+                   (incf level)
+                   (setf c (-> data (char-at (incf i))))))
+               (setf (@ p text-node) c
+                     (@ p state) (@ s :headline-title)))
+               (emit p 'open-headline (create :level level))
+             (break))
+
+            ;; HEADLINE TITLE
+            ((@ s :headline-title)
+             (let ((text-node (@ p text-node)))
+               (while (and c (not (is-newline c)))
+                 (setf text-node (+ text-node c))
+                 (setf c (-> data (char-at (incf i)))))
+
+               (emit p :title text-node)
+               (setf (@ p state) (@ s :newline)))
+             (break))
+            
+            ;; WHITESPACE
+            ((@ s :begin-whitespace)
+             (-> console (log "whitespace"))
+             (cond ((is-char c)
+                    (setf (@ p state) (@ s :text))
+                    (setf (@ p text-node) c))
+                   ((is-newline c)
+                    (setf (@ p state) (@ s :newline)))
+                   (t (throw (new (*error (+ "Not expected: " c))))))
+             (break))
+
+            ;; NEWLINE
+            ((@ s :newline)
+             (emit p :newline)
+             (setf (@ p state) (@ s :begin))
+             (break))
+            
+            ;; TEXT
+            ((@ s :text)
+             (let ((text-node (@ p text-node)))
+               (while (and c (not (is-control-char c)))
+                 (setf text-node (+ text-node c))
+                 (incf i)
+                 (setf c (-> data (char-at i))))
+
+               (emit p :text text-node)
+               
+               (cond ((eq c "*")
+                      (setf (@ p state) (@ s :headline-l1)))
+                     ((eq c " ")
+                      (setf (@ p state) (@ s :begin-whitespace)))))
+
+             (setf (@ p text-node) "")
+             (break))
+
+            ;; NO LUCK
+            (default
+                (throw (new (*error p (+ "unknown state: " (@ p state)))))))
+
+          (incf i)))))
+
+  (defun reset ()
+    ))
+
+;; (defun main ()
+;;   (labels ((alert-text (text)
+;;              (-> console (log text)))
+;;            (alert-headline (headline)
+;;              (-> console (log (+ "Title:" headline))))
+;;            (new-headline (data)
+;;              (-> console (log (+ "Level: " (@ data level))))))
+;;     (let ((parser (new (*org-parser (create 'open-headline new-headline
+;;                                             'text alert-text
+;;                                             'title alert-headline)))))
+;;       (-> parser (write "Hello
+
+;; * Headline
+;;   More
+;; ** Another headline
+;; ")))))
