@@ -1,0 +1,135 @@
+
+(defmacro deftest (name args &body func)
+  `(chain *q-unit (test ,name (lambda ,args ,@func))))
+
+(defmacro deftest/1 (name args &body func)
+  `(deftest ,name ,args (chain ,(car args) (expect 1)) ,@func))
+
+(defmacro deftest/2 (name args &body func)
+  `(deftest ,name ,args (chain ,(car args) (expect 2)) ,@func))
+
+(defmacro deftest/3 (name args &body func)
+  `(deftest ,name ,args (chain ,(car args) (expect 3)) ,@func))
+
+(defmacro deftest/4 (name args &body func)
+  `(deftest ,name ,args (chain ,(car args) (expect 4)) ,@func))
+    
+;; helper functions
+
+(defun assert-cb-called (assert)
+  "Return cb that asserts that it was called"
+  (lambda (data)
+    (-> console (log data))
+    (-> assert (ok 1 1 "event called"))))
+
+(defun write-types (p data &key between-cb (no-split-data nil))
+  "This will write data to parser in both batch and streaming way"
+  (-> p (write data))
+  (-> p (reset))
+  (when between-cb
+    (between-cb))
+  (unless no-split-data
+    (dolist (char (-> data (split "")))
+      (-> p (write char)))))
+
+;; 1 & 2 some basic tests
+
+(defun get-simple-parser (assert &key (whole-title nil))
+  (let ((order-num 0)
+        (order (array " H" "e" "y")))
+    (labels ((on-title (text)
+               (if whole-title
+                   (-> assert (equal text whole-title "expected title"))
+                   (progn
+                     (-> assert (equal text (aref order order-num) (+ "expected title char: " text)))
+                     (incf order-num))))
+             (on-text (text)
+               (throw (new (*error "on-text should not be called"))))
+             (on-newline ()
+               (throw (new (*error "on-newline should not be called"))))
+             (on-open-headline (data)
+               (-> assert (ok t t "open headline")))
+             (on-close-headline (data)
+               (-> assert (equal (@ data level) 0 "headline level is correct"))))
+    (new (*org-parser (create 'open-headline on-open-headline
+                              'close-headline on-close-headline
+                              'text on-text
+                              'title on-title
+                              'newline on-newline))))))
+
+(deftest/3 "1. Parsing simple hadline" (assert)
+  (-> (get-simple-parser assert :whole-title " Hey") (write "* Hey")))
+
+(deftest "2. Streaming parsing simple hadline" (assert)
+  (-> assert (expect 5))
+  (let ((data "* Hey")
+        (p (get-simple-parser assert)))
+    (dolist (char (-> data (split "")))
+      (-> p (write char)))))
+
+;; 3 - assert events are called correctly with simple input
+
+(deftest/2 "3.1 Basic events: open-headline" (assert)
+  (let ((p (new (*org-parser (create 'open-headline (assert-cb-called assert))))))
+    (write-types p "* Test")))
+
+(deftest/2 "3.2 Basic events: close-headline" (assert)
+  (let ((p (new (*org-parser (create 'close-headline (assert-cb-called assert))))))
+    (write-types p "* Test")))
+
+(deftest "3.3 Basic events: text" (assert)
+  (-> assert (expect 3))
+  (let ((p (new (*org-parser (create 'text (assert-cb-called assert))))))
+    (write-types p "Test")))
+
+(deftest "3.4 Basic events: title" (assert)
+  (-> assert (expect 5))
+  (let ((p (new (*org-parser (create 'title (assert-cb-called assert))))))
+    (write-types p "* Test")))
+
+(deftest/2 "3.5 Basic events: newline" (assert)
+  (let ((p (new (*org-parser (create 'newline (assert-cb-called assert))))))
+    (write-types p "* Test
+Text")))
+    
+;; 4 - titles
+
+(deftest/2 "4.1 Second level title" (assert)
+  (flet ((check-level (data)
+           (-> assert (equal (@ data level) 1 "correct title level"))))
+    (let ((p (new (*org-parser (create 'close-headline check-level)))))
+      (write-types p "** Test"))))
+
+(deftest/4 "4.2 First and second level titles" (assert)
+  (defvar callnum 0)
+  (flet ((check-level (data)
+           (-> assert (equal (@ data level) callnum "correct title level"))
+           (incf callnum)))
+    (let ((p (new (*org-parser (create 'close-headline check-level))))
+          (data "* Test1
+** Test2"))
+      (write-types p data :between-cb (lambda () (setf callnum 0))))))
+          
+;; 5 - newlines
+
+(deftest "5.1 Multiple newlines" (assert)
+  (-> assert (expect 6))
+  (let ((p (new (*org-parser (create 'newline (assert-cb-called assert))))))
+    (write-types p "Test
+
+
+Text")))
+
+;; 6 - todo
+
+(deftest/2 "6.1 Basic todo" (assert)
+  (let ((p (new (*org-parser (create 'todo (assert-cb-called assert))))))
+    (write-types p "* TODO Test")))
+
+;; (deftest/2 "6.2 Rest of title emits correctly"
+  
+;; 7 - variables
+
+(deftest/2 "7.1 Basic variable" (assert)
+  (let ((p (new (*org-parser (create 'var (assert-cb-called assert))))))
+    (write-types p "#+TITLE: Mikhail")))

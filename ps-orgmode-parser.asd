@@ -8,5 +8,6 @@
   :components ((:static-file "ps-ordmode-parser.asd")
                (:file "package")
                (:file "main")
-               (:parenscript-file "parser"))
+               (:parenscript-file "parser")
+               (:parenscript-file "tests"))
   :depends-on (:serve.paren :plus.paren :contracts.paren))

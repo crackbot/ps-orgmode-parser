@@ -10,18 +10,24 @@
                        'close-headline
                        'text
                        'title
-                       'new-line))
+                       'todo
+                       'var
+                       'newline))
 
 (defvar *states (array :begin
                        :begin-whitespace
                        :newline
                        :text
+                       :todo-item
+                       :title-var
                        :headline-l1
                        :headline-title))
 
+(defmacro log (arg)
+  `(-> console (log ,arg)))
+
 ;; init state map
 (defvar *state (create))
-
 (defvar _s 0)
 
 (dolist (s *states)
@@ -31,20 +37,60 @@
 (defun is-newline (c)
   (eq (-> c (char-code-at 0)) 10))
 
-  ;;     (eq c "\t")
-  ;; )
-
 (defun is-whitespace (c)
   (eq c " "))
 
 (defun is-char (c)
   (let ((number "0124356789")
-        (letter "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+        (letter "#+:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"))
     (or (> (-> number (index-of c)) -1)
-        (> (-> letter (index-of c)) -1))))
+        (> (-> letter (index-of c)) -1)
+        (eq c " "))))
 
 (defun is-control-char (c)
   (eq c "*"))
+
+;; possible states
+
+(defvar *possible-state-map (create))
+(defvar *tokens (array "TODO" "#+TITLE:"))
+(defvar *token-state-map (create "TODO" :todo-item
+                                 "#+TITLE:" :title-var))
+
+(defun create-possible (string)
+  (let* ((match-state f)
+         (match-buffer "")
+         (first-char (-> string (char-at 0)))
+         (reset (lambda ()
+                  (setf match-state f
+                        match-buffer ""))))
+    (lambda (char)
+      (when (eq (-> char (char-at 0)) first-char)
+        (setf match-state t))
+      
+      (when match-state
+        (setf match-buffer (+ match-buffer char)))
+
+      (if (eq (-> string (index-of match-buffer)) -1)
+          (reset)
+          (when (eq string match-buffer)
+            (reset)
+            (getprop *token-state-map string))))))
+
+(defun match-through (c)
+  (let (res)
+    (dolist (token *tokens)
+      (let* ((fun (getprop *possible-state-map token))
+             (lres (funcall fun c)))
+        (when lres
+          (setf res lres))))
+    res))
+
+(dolist (token *tokens)
+  (setf (getprop *possible-state-map token)
+        (create-possible token)))
+
+;;
 
 (defun emit (parser event value)
   (let ((cb (getprop (@ parser options) event)))
@@ -54,9 +100,29 @@
 (defjsclass *org-parser ()
   
   (defun initialize (options)
-    (setf% options options
-           state (@ *state :begin)
-           text-node ""))
+    (setf% options options)
+    (-> this (reset)))
+
+  (defun reset ()
+    (setf% state (@ *state :begin)
+           old-state nil
+
+           headline-level 0
+           text-node ""
+
+           ;; if text start with TODO it will add char by char into
+           ;; this buffer, and proceed to todo-item state
+           todo-buffer ""
+           todo-match nil))
+  
+  (defun set-state (new-state-name)
+    (setf% old-state (@ this state)
+           state (getprop *state new-state-name)))
+
+  (defun revert-state ()
+    (setf% state (@ this old-state)))
+
+  ;(defun write-char (c)
   
   (defun write (data)
     (let ((i 0)
@@ -64,87 +130,142 @@
           (s *state))
       (while t
         (let ((c (-> data (char-at i))))
-
+          
           (when (not c)
+            ;; see if there are any non empty buffers, emit those
+            ;; buffers based on parser state
+            ;; (when (not (eq (@ p text-node) ""))
+            ;;   (if (eq (@ p state) (@ s :headline-title))
+            ;;       (emit p :title (@ p text-node))
+            ;;       (emit p :text (@ p text-node)))
+            ;;   (setf (@ p text-node) ""))
             (break))
-
-          ; (-> console (log (+ "switch: " (@ p state))))
           
           (switch (@ p state)
 
             ;; BEGIN
             ((@ s :begin)
              (cond ((eq c "*")
-                    (progn
-                      (setf (@ p state) (@ s :headline-l1))))
+                    (-> p (set-state :headline-l1))
+                    (emit p 'open-headline))
                    ((is-char c)
                     (setf (@ p text-node) c)
-                    (setf (@ p state) (@ s :text)))
-                   ((is-whitespace c)
-                    (setf (@ p state) (@ s :begin-whitespace)))
+                    (-> p (set-state :text)))
                    ((is-newline c)
-                    (setf (@ p state) (@ s :newline)))
-                   (t
-                    (progn
-                      (-> console (log c))
-                      (throw (new (*error (+ "Not correct char: " (-> c (char-code-at 0)))))))))
+                    (-> p (set-state :newline)))
+                   (t (throw (new (*error (+ "Not correct char: " (-> c (char-code-at 0))))))))
              (break))
 
             ;; HEADLINE START
+            ;; asterisk, text, or newline comes next
             ((@ s :headline-l1)
-             ;; text, or newline comes next
-             (let ((level 0))
-               (when (eq c "*") ; means it's headline l2-l6
-                 (while (and c (eq c "*"))
-                   (incf level)
-                   (setf c (-> data (char-at (incf i))))))
-               (setf (@ p text-node) c
-                     (@ p state) (@ s :headline-title)))
-               (emit p 'open-headline (create :level level))
+             (cond ((eq c "*")
+                    (incf (@ p headline-level))
+                    (-> p (set-state :headline-l1)))
+                   ((is-newline c)
+                    (-> p (set-state :newline))
+                    (emit p 'close-headline (create :level (@ p headline-level)))
+                    (setf (@ p headline-level) 0))
+                   ((is-char c)
+                    (setf (@ p text-node) c)
+                    (-> p (set-state :headline-title))
+                    (emit p 'close-headline (create :level (@ p headline-level)))
+                    (setf (@ p headline-level) 0))
+                   (t (throw (new (*error (+ "Not expecting: " (-> c (char-code-at 0))))))))
              (break))
 
             ;; HEADLINE TITLE
+            ;; Example:
+            ;; * Test title
+            
+            ;; this is interrupted only with newline, if no newline is
+            ;; present and we have no data left, we set state to :begin
             ((@ s :headline-title)
-             (let ((text-node (@ p text-node)))
+             (let* ((text-node (@ p text-node))
+                    (state-res nil))
                (while (and c (not (is-newline c)))
-                 (setf text-node (+ text-node c))
-                 (setf c (-> data (char-at (incf i)))))
+                                  
+                 (setf text-node (+ text-node c)
+                       state-res (match-through c))
 
+                 (when state-res
+                   (break))
+                 ;; text-node
+                 ;; " T"
+                 ;; "TO"
+                 
+                 (setf c (-> data (char-at (incf i)))))
                (emit p :title text-node)
-               (setf (@ p state) (@ s :newline)))
+
+               (cond (state-res
+                      (-> p (set-state state-res)))
+                     ;; ((eq (@ p todo-buffer) *todo-token)
+                     ;;  (-> p (set-state :todo-item)))
+                     ((is-newline c)
+                      (-> p (set-state :newline)))
+                     (t (-> p (set-state :headline-title)))))
+               
+             (setf (@ p text-node) "")
+             (break))
+
+            ;; TODO item
+            ;; todo item comes right after the headline sign
+            ((@ s :todo-item)
+             (emit p :todo)
+             (-> p (set-state :begin))
+             (break))
+
+            ((@ s :title-var)
+             (emit p :var (create :name "title"))
+             (-> p (set-state :begin))
              (break))
             
             ;; WHITESPACE
-            ((@ s :begin-whitespace)
-             (-> console (log "whitespace"))
-             (cond ((is-char c)
-                    (setf (@ p state) (@ s :text))
-                    (setf (@ p text-node) c))
-                   ((is-newline c)
-                    (setf (@ p state) (@ s :newline)))
-                   (t (throw (new (*error (+ "Not expected: " c))))))
-             (break))
+            ;; ((@ s :begin-whitespace)
+            ;;  (-> console (log "whitespace"))
+            ;;  (cond ((is-char c)
+            ;;         (-> p (set-state :text))
+            ;;         (setf (@ p text-node) c))
+            ;;        ((is-newline c)
+            ;;         (-> p (set-state :newline)))
+            ;;        (t (throw (new (*error (+ "Not expected: " c))))))
+            ;;  (break))
 
             ;; NEWLINE
             ((@ s :newline)
              (emit p :newline)
-             (setf (@ p state) (@ s :begin))
+             (cond ((eq c "*")
+                    (-> p (set-state :headline-l1)))
+                   ((is-newline c)
+                    (-> p (set-state :newline)))
+                   ((is-char c)
+                    (setf (@ p text-node) c)
+                    (-> p (set-state :headline-title)))
+                   (t (throw (new (*error (+ "Not expecting: " (-> c (char-code-at 0))))))))
              (break))
             
             ;; TEXT
+            ;; text can be interrupted only by a newline
             ((@ s :text)
-             (let ((text-node (@ p text-node)))
-               (while (and c (not (is-control-char c)))
-                 (setf text-node (+ text-node c))
-                 (incf i)
-                 (setf c (-> data (char-at i))))
+             (let* ((text-node (@ p text-node))
+                    (state-res (when text-node
+                                 (match-through text-node))))
+               (while (and c (not (is-newline c)))
+                 (setf text-node (+ text-node c)
+                       state-res (match-through c))
+                 (when state-res
+                   (break))
+                 (setf c (-> data (char-at (incf i)))))
 
                (emit p :text text-node)
-               
-               (cond ((eq c "*")
-                      (setf (@ p state) (@ s :headline-l1)))
-                     ((eq c " ")
-                      (setf (@ p state) (@ s :begin-whitespace)))))
+
+               (cond (state-res
+                      (-> p (set-state state-res)))
+                     ((not c)
+                      (-> p (set-state :begin)))
+                     ((is-newline c)
+                      (-> p (set-state :newline)))
+                     (t (throw (new (*error (+ "Not correct char: " (-> c (char-code-at 0)))))))))
 
              (setf (@ p text-node) "")
              (break))
@@ -153,24 +274,8 @@
             (default
                 (throw (new (*error p (+ "unknown state: " (@ p state)))))))
 
+          
+          
           (incf i)))))
 
-  (defun reset ()
-    ))
-
-;; (defun main ()
-;;   (labels ((alert-text (text)
-;;              (-> console (log text)))
-;;            (alert-headline (headline)
-;;              (-> console (log (+ "Title:" headline))))
-;;            (new-headline (data)
-;;              (-> console (log (+ "Level: " (@ data level))))))
-;;     (let ((parser (new (*org-parser (create 'open-headline new-headline
-;;                                             'text alert-text
-;;                                             'title alert-headline)))))
-;;       (-> parser (write "Hello
-
-;; * Headline
-;;   More
-;; ** Another headline
-;; ")))))
+  )
