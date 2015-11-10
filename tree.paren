@@ -8,6 +8,7 @@
   (defun initialize (root options)
     (setf% root root
            value ""
+           css "root"
            options options
            children (array))
     (when (@ this setup)
@@ -34,14 +35,24 @@
           (-> this (siblings))))
 
   (defun text ()
-    (@ this value)))
+    (@ this value))
+
+  (defun render ()
+    (let ((el (-> document (create-element :div))))
+      (setf (@ el class-name) (@ this css)
+            (@ el inner-h-t-m-l) (-> this (text)))
+      
+      el)))
 
 (defjsclass *headline-node (*node)
   (defun setup ()
-    (setf% depth 0))
+    (setf% css "headline-0"
+           depth 0))
 
   (defun incf-depth ()
-    (incf (@ this depth)))
+    (incf (@ this depth))
+    (setf (@ this css)
+          (+ "headline-" (@ this depth))))
   
   (defun text ()
     (let ((res ""))
@@ -52,16 +63,25 @@
       (+ res (@ this value)))))
 
 (defjsclass *text-node (*node)
-  )
+  (defun setup ()
+    (setf% css "text")))
 
 (defjsclass *tree ()
   (defun initialize ()
     (setf% root (new (*node this
                             (create :type 'root)))))
   
-  (defun bfs ()
+  (defun bfs (fun)
     "breadth first search"
-    )
+    (labels ((process-node (node)
+               (with-slots (children) node
+                 (when (length children)
+                   (dolist (child children)
+                     (fun child))
+                   (dolist (child children)
+                     (process-node child))))))
+      (fun (@ this root))
+      (process-node (@ this root))))
 
   (defun dfs (fun)
     "depth first search"
@@ -70,19 +90,28 @@
                (with-slots (children) node
                  (when (length children)
                    (process-node (car children)))
-
                  (when (> (length children) 1)
                    (dolist (child (cdr children))
                      (process-node child))))))
-    (with-slots (root) this
-      (process-node root))))
+      (process-node (@ this root))))
   
   (defun pprint ()
     (let ((res "")
           (nl (-> *string (from-char-code 13))))
       (-> this (dfs (lambda (node)
                       (setf res (+ res (-> node (text)) nl)))))
-      res)))
+      res))
+
+  (defun render ()
+    "This will transform parse tree into DOM tree"
+    (setf (@ this dom-node)
+          (-> document (create-element :div)))
+    (-> this (bfs (lambda (node)
+                    (let ((dom-node (-> node (render)))
+                          (parent-dom (@ node root dom-node)))
+                      (setf (@ node dom-node) dom-node)
+                      (-> parent-dom (append-child dom-node))))))
+    (@ this dom-node)))
 
 (defjsclass *org-tree-parser ()
   (defun initialize (options)
@@ -146,7 +175,8 @@
 
 (defun main ()
   (let ((p (-> (new (*org-tree-parser)))))
-    (-> p (write "Text0
+    (-> p (write "* YO
+Text0
 * Hello1
 Text1
 ** Hello2
@@ -156,4 +186,7 @@ Text1
     (let ((pre (-> document (create-element :pre)))
           (parent (-> document (get-element-by-id :hello))))
       (setf (@ pre inner-h-t-m-l) (-> p tree (pprint)))
-      (-> parent (append-child pre)))))
+      (-> parent (append-child pre)))
+
+    (let ((el (-> document (get-element-by-id :main))))
+      (-> el (append-child (-> p tree (render)))))))
