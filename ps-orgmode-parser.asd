@@ -9,5 +9,6 @@
                (:file "package")
                (:file "main")
                (:parenscript-file "parser")
+               (:parenscript-file "tree")
                (:parenscript-file "tests"))
   :depends-on (:serve.paren :plus.paren :contracts.paren))

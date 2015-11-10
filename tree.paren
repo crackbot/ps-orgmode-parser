@@ -1,0 +1,159 @@
+
+;; parse orgmode stream into a tree
+
+(defun create-node (root &key (cls *node))
+  (new (cls root (create))))
+
+(defjsclass *node ()
+  (defun initialize (root options)
+    (setf% root root
+           value ""
+           options options
+           children (array))
+    (when (@ this setup)
+      (-> this (setup))))
+
+  (defun add-node (&key (cls *node))
+    (let ((child (new (cls))))
+      (setf (@ child root) this)
+      (-> this (add-child child))))
+  
+  (defun add-child (child)
+    (setf (@ child root) this)
+    (-> this children (push child)))
+
+  (defun siblings ()
+    (var self this)
+    (remove-if (lambda (node)
+                 (eq node self))
+               (@ this root children)))
+
+  (defun remove ()
+    "Deatach the node from the tree"
+    (setf (@ this root children)
+          (-> this (siblings))))
+
+  (defun text ()
+    (@ this value)))
+
+(defjsclass *headline-node (*node)
+  (defun setup ()
+    (setf% depth 0))
+
+  (defun incf-depth ()
+    (incf (@ this depth)))
+  
+  (defun text ()
+    (let ((res ""))
+      (do ((x 0 (+ x 1)))
+          ((> x (@ this depth)))
+        (setf res (+ res "*")))
+
+      (+ res (@ this value)))))
+
+(defjsclass *text-node (*node)
+  )
+
+(defjsclass *tree ()
+  (defun initialize ()
+    (setf% root (new (*node this
+                            (create :type 'root)))))
+  
+  (defun bfs ()
+    "breadth first search"
+    )
+
+  (defun dfs (fun)
+    "depth first search"
+    (labels ((process-node (node)
+               (fun node)
+               (with-slots (children) node
+                 (when (length children)
+                   (process-node (car children)))
+
+                 (when (> (length children) 1)
+                   (dolist (child (cdr children))
+                     (process-node child))))))
+    (with-slots (root) this
+      (process-node root))))
+  
+  (defun pprint ()
+    (let ((res "")
+          (nl (-> *string (from-char-code 13))))
+      (-> this (dfs (lambda (node)
+                      (setf res (+ res (-> node (text)) nl)))))
+      res)))
+
+(defjsclass *org-tree-parser ()
+  (defun initialize (options)
+    (setf% current-node nil
+           tree (new (*tree))
+           parser (new (*org-parser (-> this (init-parser-opts))))))
+
+  (defun init-parser-opts ()
+    (let ((cbs (create)))
+      (dolist (ev *events) ;; <- this is orgmode-parser events
+        (let* ((ev-capital (+ (-> ev (char-at 0) (to-upper-case))
+                             (-> ev (slice 1))))
+              (cb (getprop this (+ "on" ev-capital))))
+          (when cb
+            (setf (getprop cbs ev)
+                  (-> cb (bind this))))))
+      cbs))
+
+  (defun write (data)
+    (-> this parser (write data)))
+
+  (defun root-or-current ()
+    (or (@ this current-node)
+        (@ this tree root)))
+  
+  ;; HEADLINE
+  (defun on-headline-start ()
+    (let* ((tree (@ this tree))
+           (node (create-node (@ tree root)
+                              :cls *headline-node)))
+      (setf (@ this current-node) node)
+      (-> tree root (add-child node))))
+      
+  ;; if getting headline depth means it's second level or deeper
+  ;; get the parent and add a child to it
+  (defun on-headline-depth ()
+    (let* ((node (@ this current-node))
+           (tobe-parent (last (-> node (siblings)))))
+      (-> node (incf-depth))
+      (-> node (remove))
+      (-> tobe-parent (add-child node))))
+  
+  (defun on-headline (data)
+    (let ((cur (@ this current-node)))
+      (setf (@ cur value)
+            (+ (@ cur value) data))))
+
+  ;; TEXT
+  (defun on-text (data)
+    (when (not (instanceof (@ this current-node)
+                            *text-node))
+        (let* ((tree (@ this tree))
+               (new-node-root (-> this (root-or-current)))
+               (node (create-node (-> this new-node-root)
+                                  :cls *text-node)))
+          (setf (@ this current-node) node)
+          (-> new-node-root (add-child node))))
+
+    (setf (@ this current-node value)
+          (+ (@ this current-node value) data))))
+
+(defun main ()
+  (let ((p (-> (new (*org-tree-parser)))))
+    (-> p (write "Text0
+* Hello1
+Text1
+** Hello2
+*** Hello3"))
+    (log p)
+    (setf (@ window parser) p)
+    (let ((pre (-> document (create-element :pre)))
+          (parent (-> document (get-element-by-id :hello))))
+      (setf (@ pre inner-h-t-m-l) (-> p tree (pprint)))
+      (-> parent (append-child pre)))))
