@@ -1,15 +1,19 @@
-
 ;; parse orgmode stream into a tree
 
 (defun create-node (root &key (cls *node))
   (new (cls root (create))))
+
+;; NODES
 
 (defjsclass *node ()
   (defun initialize (root options)
     (setf% root root
            value ""
            css "root"
+           
            options options
+           
+           can-have-children t
            children (array))
     (when (@ this setup)
       (-> this (setup))))
@@ -35,24 +39,30 @@
           (-> this (siblings))))
 
   (defun text ()
+    "Returns text representation of the dom"
     (@ this value))
 
+  (defun vdom ()
+    "Builds vdom node"
+    (-> virtual-dom (h :div (create class-name (@ this css))
+                       (array (-> this (text))))))
+  
   (defun render ()
+    "Creates DOM elements"
     (let ((el (-> document (create-element :div))))
       (setf (@ el class-name) (@ this css)
             (@ el inner-h-t-m-l) (-> this (text)))
-      
       el)))
 
 (defjsclass *headline-node (*node)
   (defun setup ()
-    (setf% css "headline-0"
+    (setf% css "line headline-0"
            depth 0))
 
   (defun incf-depth ()
     (incf (@ this depth))
     (setf (@ this css)
-          (+ "headline-" (@ this depth))))
+          (+ "line headline-" (@ this depth))))
   
   (defun text ()
     (let ((res ""))
@@ -64,7 +74,14 @@
 
 (defjsclass *text-node (*node)
   (defun setup ()
-    (setf% css "text")))
+    (setf% css "line text")))
+
+(defjsclass *nl-node (*node)
+  (defun setup ()
+    (setf% can-have-children f
+           css "nl")))
+
+;; TREE
 
 (defjsclass *tree ()
   (defun initialize ()
@@ -102,6 +119,38 @@
                       (setf res (+ res (-> node (text)) nl)))))
       res))
 
+  (defun render-vdom ()
+    "Render vdom"
+    (setf (@ this dom-node)
+          (-> virtual-dom (h :div (create class-name :holder))))
+
+    ;; TODO we need to set correct `count` prop on each vdom node, the
+    ;; easiest is to run reverse bfs, optimize
+
+    (let ((stack (array (@ this dom-node))))
+      (-> this (bfs (lambda (node)
+                      (let ((dom-node (-> node (vdom)))
+                            (parent-dom (@ node root dom-node)))
+                        (-> stack (push dom-node))
+                        (setf (@ node dom-node) dom-node)
+                        (when (numberp (@ dom-node count))
+                          (setf (@ dom-node count) 0))
+                        (-> parent-dom children (push dom-node))))))
+      
+      (do ((x (length stack) (- x 1)))
+          ((<= x 0))
+        (let ((node (aref stack (- x 1))))
+          (when (numberp (@ node count))
+            (let ((children 0))
+              (dolist (child (@ node children))
+                (if (@ child count)
+                    (setf children (+ children 1 (@ child count)))
+                    (setf children (+ children 1)))))
+
+            (setf (@ node count) children)))))
+      
+      (@ this dom-node))
+  
   (defun render ()
     "This will transform parse tree into DOM tree"
     (setf (@ this dom-node)
@@ -112,6 +161,8 @@
                       (setf (@ node dom-node) dom-node)
                       (-> parent-dom (append-child dom-node))))))
     (@ this dom-node)))
+
+;; PARSER
 
 (defjsclass *org-tree-parser ()
   (defun initialize (options)
@@ -159,20 +210,52 @@
       (setf (@ cur value)
             (+ (@ cur value) data))))
 
+  (defun get-text-root ()
+    )
+  
   ;; TEXT
   (defun on-text (data)
-    (when (not (instanceof (@ this current-node)
-                            *text-node))
-        (let* ((tree (@ this tree))
-               (new-node-root (-> this (root-or-current)))
-               (node (create-node (-> this new-node-root)
-                                  :cls *text-node)))
-          (setf (@ this current-node) node)
-          (-> new-node-root (add-child node))))
+    ;; when current node is text we just add data to it, if not, then
+    ;; create a new text node
+    (var self this)
+    (labels ((get-text-root ()
+               ;; text root is either the root of the document when
+               ;; text if the first input, or it's the current-node,
+               ;; but only if current-node can have children, if
+               ;; current-node can't have children take current-node
+               ;; root
+               (if (@ self current-node)
+                   (if (@ self current-node can-children)
+                       (@ self current-node)
+                       (@ self current-node root))
+                   (@ self tree root)))
 
-    (setf (@ this current-node value)
-          (+ (@ this current-node value) data))))
+             (create-text-node ()
+               (let* ((tree (@ this tree))
+                      (new-node-root (get-text-root))
+                      (node (create-node new-node-root
+                                         :cls *text-node)))
+                 (setf (@ self current-node) node)
+                 (-> new-node-root (add-child node)))))
+    
+      (when (not (instanceof (@ this current-node)
+                             *text-node))
+        (create-text-node))
+      
+      (setf (@ this current-node value)
+            (+ (@ this current-node value) data))))
 
+  (defun on-newline ()
+    (let* ((root (if (@ this current-node)
+                    (@ this current-node root)
+                    (@ this tree root)))
+          (node (create-node root :cls *nl-node)))
+
+      (log root)
+      
+      (setf (@ this current-node) node)
+      (-> root (add-child node)))))
+  
 (defun main ()
   (let ((p (-> (new (*org-tree-parser)))))
     (-> p (write "* YO
@@ -189,4 +272,9 @@ Text1
       (-> parent (append-child pre)))
 
     (let ((el (-> document (get-element-by-id :main))))
-      (-> el (append-child (-> p tree (render)))))))
+      (-> el (append-child (-> p tree (render)))))
+
+    (let* ((el (-> document (get-element-by-id :vdom)))
+           (tree (-> p tree (render-vdom)))
+           (node (-> virtual-dom (create tree))))
+      (-> el (append-child node)))))
